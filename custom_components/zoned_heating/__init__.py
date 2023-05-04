@@ -24,7 +24,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data[const.DOMAIN][entry.entry_id] = {}
 
     # Set up all platforms for this device/entry.
-    hass.config_entries.async_setup_platforms(entry, [Platform.SWITCH])
+    hass.config_entries.async_forward_entry_setups(entry, [Platform.SWITCH])
 
     # Reload entry when its updated.
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
