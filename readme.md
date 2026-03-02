@@ -30,6 +30,9 @@ The Zoned heating integration creates a switch entity `switch.zoned_heating` whi
 * `On`: Zoned heating is enabled, the integration watches the zones for heat demand and controls the controller accordingly.
 * `Off`: Zoned heating is disabled, zones are independent from the controller.
 
+### Fixed idle controller mode (TRV rooms)
+If you have TRVs in the same room as the thermostat that controls the boiler, the thermostat's own internal behaviour can conflict with TRV adjustments. Use the "fixed controller mode/temperature" option in the integration options to force the controller to a predictable HVAC mode and setpoint while Zoned Heating is inactive.
+
 ### Attributes
 The `switch.zoned_heating` entity exposes the following attributes:
 
@@ -74,4 +77,3 @@ The following limitations are known and possibly addressed in future updates:
 * The integration is only tested for `climate` modes `heat` and `off`. Modes `cool` and `heat_cool` might result in unwanted behaviour.
 * The override logic assumes that your zones can heat up quicker than the controller. If this is not the case, the zones may never reach the desired temperature.
 * This integration does not handle presets for `climate` devices.
-

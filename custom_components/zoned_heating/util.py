@@ -121,4 +121,6 @@ async def async_set_switch_state(hass: HomeAssistant, entity_ids, state: str):
 
 
 def compute_domain(entity_id: str):
-    return entity_id.split(".").pop(0)
+    if not entity_id or "." not in entity_id:
+        return None
+    return entity_id.split(".", 1)[0]

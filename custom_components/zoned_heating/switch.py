@@ -53,23 +53,46 @@ async def async_setup_entry(
     max_setpoint = config_entry.options.get(const.CONF_MAX_SETPOINT)
     controller_delay_time = config_entry.options.get(const.CONF_CONTROLLER_DELAY_TIME, const.DEFAULT_CONTROLLER_DELAY_TIME)
     hysteresis = config_entry.options.get(const.CONF_HYSTERESIS, config_entry.data.get(const.CONF_HYSTERESIS, const.DEFAULT_HYSTERESIS))
+    use_fixed_idle_controller_state = config_entry.options.get(
+        const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE,
+        const.DEFAULT_USE_FIXED_IDLE_CONTROLLER_STATE,
+    )
+    fixed_idle_controller_mode = config_entry.options.get(const.CONF_FIXED_IDLE_CONTROLLER_MODE)
+    fixed_idle_controller_temperature = config_entry.options.get(const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE)
 
-    async_add_entities([
-        ZonedHeaterSwitch(hass, controller, zones, max_setpoint, controller_delay_time, hysteresis)
-    ])
+    entity = ZonedHeaterSwitch(hass,controller, zones, max_setpoint, controller_delay_time, hysteresis, use_fixed_idle_controller_state, fixed_idle_controller_mode, fixed_idle_controller_temperature)
+    async_add_entities([entity])
+
+    # Store reference to the created entity so update listener can find it
+    hass.data.setdefault(const.DOMAIN, {}).setdefault(config_entry.entry_id, {})
+    hass.data[const.DOMAIN][config_entry.entry_id]["entity"] = entity
+
+    async def _async_options_updated(hass, entry):
+        # find the platform entity instance and call its update method if present
+        ent = hass.data[const.DOMAIN].get(entry.entry_id, {}).get("entity")
+        if ent:
+            await ent.async_options_updated(entry.options)
+
+    config_entry.add_update_listener(_async_options_updated)
 
 
 class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
 
     _attr_name = "Zoned Heating"
 
-    def __init__(self, hass, controller_entity, zone_entities, max_setpoint, controller_delay_time, hysteresis):
+    def __init__(self, hass, controller_entity, zone_entities, max_setpoint, controller_delay_time, hysteresis, use_fixed_idle_controller_state, fixed_idle_controller_mode, fixed_idle_controller_temperature):
         self.hass = hass
         self._controller_entity = controller_entity
         self._zone_entities = zone_entities
         self._max_setpoint = max_setpoint
         self._controller_delay_time = controller_delay_time
         self._hysteresis = hysteresis
+        self._use_fixed_idle_controller_state = (
+            use_fixed_idle_controller_state and
+            compute_domain(controller_entity) == Platform.CLIMATE
+        )
+        self._fixed_idle_controller_mode = fixed_idle_controller_mode
+        self._fixed_idle_controller_temperature = fixed_idle_controller_temperature
 
         self._enabled = None
         self._state_listeners = []
@@ -89,9 +112,16 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         if state:
             _LOGGER.debug("Restored data prior to restart: %s", state.attributes)
             self._enabled = state.state == STATE_ON
-            self._override_active = state.attributes.get(const.ATTR_OVERRIDE_ACTIVE)
-            self._temperature_increase = state.attributes.get(const.ATTR_TEMPERATURE_INCREASE)
-            self._stored_controller_setpoint = state.attributes.get(const.ATTR_STORED_CONTROLLER_SETPOINT)
+            self._override_active = bool(state.attributes.get(const.ATTR_OVERRIDE_ACTIVE))
+            try:
+                self._temperature_increase = float(state.attributes.get(const.ATTR_TEMPERATURE_INCREASE) or 0)
+            except Exception:
+                self._temperature_increase = 0
+            try:
+                scs = state.attributes.get(const.ATTR_STORED_CONTROLLER_SETPOINT)
+                self._stored_controller_setpoint = float(scs) if scs is not None else None
+            except Exception:
+                self._stored_controller_setpoint = None
             self._stored_controller_state = state.attributes.get(const.ATTR_STORED_CONTROLLER_STATE)
         else:
             self._enabled = True
@@ -110,7 +140,7 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         return self._enabled
 
     @property
-    def state_attributes(self):
+    def extra_state_attributes(self):
         """Return the data of the entity."""
         return {
             const.CONF_CONTROLLER: self._controller_entity,
@@ -118,6 +148,9 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
             const.CONF_MAX_SETPOINT: self._max_setpoint,
             const.CONF_CONTROLLER_DELAY_TIME: self._controller_delay_time,
             const.CONF_HYSTERESIS: self._hysteresis,
+            const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE: self._use_fixed_idle_controller_state,
+            const.CONF_FIXED_IDLE_CONTROLLER_MODE: self._fixed_idle_controller_mode,
+            const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE: self._fixed_idle_controller_temperature,
             const.ATTR_OVERRIDE_ACTIVE: self._override_active,
             const.ATTR_TEMPERATURE_INCREASE: self._temperature_increase,
             const.ATTR_STORED_CONTROLLER_STATE: self._stored_controller_state,
@@ -161,6 +194,33 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         ]
         _LOGGER.debug("Registered state listeners for controller=%s zones=%s", self._controller_entity, self._zone_entities)
 
+    async def async_options_updated(self, options: dict):
+        """Update runtime options from a config entry without reloading."""
+        self._controller_entity = options.get(const.CONF_CONTROLLER)
+        self._zone_entities = options.get(const.CONF_ZONES, [])
+        self._max_setpoint = options.get(const.CONF_MAX_SETPOINT, self._max_setpoint)
+        self._controller_delay_time = options.get(
+            const.CONF_CONTROLLER_DELAY_TIME, self._controller_delay_time
+        )
+        self._hysteresis = options.get(const.CONF_HYSTERESIS, self._hysteresis)
+        use_fixed = options.get(
+            const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE,
+            const.DEFAULT_USE_FIXED_IDLE_CONTROLLER_STATE,
+        )
+        self._use_fixed_idle_controller_state = (
+            use_fixed and compute_domain(self._controller_entity) == Platform.CLIMATE
+        )
+        self._fixed_idle_controller_mode = options.get(const.CONF_FIXED_IDLE_CONTROLLER_MODE)
+        self._fixed_idle_controller_temperature = options.get(const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE)
+
+        _LOGGER.debug("Config options updated: controller=%s zones=%s use_fixed=%s", self._controller_entity, self._zone_entities, self._use_fixed_idle_controller_state)
+
+        if self._enabled:
+            await self.async_start_state_listeners()
+
+        await self.async_calculate_override()
+        self.async_write_ha_state()
+
     async def async_stop_state_listeners(self):
         """stop watching for state changes of controller / zone entities"""
         while len(self._state_listeners):
@@ -168,7 +228,12 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
 
     async def async_controller_state_changed(self, event):
         """fired when controller entity changes"""
-        if self._ignore_controller_state_change_timer or not self._override_active:
+        if self._ignore_controller_state_change_timer:
+            return
+
+        if not self._override_active:
+            if self._use_fixed_idle_controller_state:
+                await self.async_apply_fixed_idle_controller_state()
             return
         old_state = parse_state(event.data["old_state"])
         new_state = parse_state(event.data["new_state"])
@@ -277,6 +342,8 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
             self._temperature_increase == temperature_increase and
             override_active == self._override_active
         ):
+            if self._use_fixed_idle_controller_state and not override_active:
+                await self.async_apply_fixed_idle_controller_state()
             # nothing to do
             return
 
@@ -301,9 +368,13 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         self._override_active = True
         current_state = parse_state(self.hass.states.get(self._controller_entity))
         # store current controller entity settings for later
-        _LOGGER.debug("Storing controller state=%s", current_state)
-        self._stored_controller_state = current_state[ATTR_HVAC_MODE]
-        self._stored_controller_setpoint = current_state[ATTR_TEMPERATURE]
+        if self._use_fixed_idle_controller_state:
+            self._stored_controller_state = None
+            self._stored_controller_setpoint = None
+        else:
+            _LOGGER.debug("Storing controller state=%s", current_state)
+            self._stored_controller_state = current_state[ATTR_HVAC_MODE]
+            self._stored_controller_setpoint = current_state[ATTR_TEMPERATURE]
 
         if current_state[ATTR_HVAC_MODE] != HVACMode.HEAT:
             # uupdate to heat mode if needed
@@ -324,7 +395,13 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         self._override_active = False
         self._temperature_increase = 0
 
-        current_state = parse_state(self.hass.states.get(self.entity_id))
+        if self._use_fixed_idle_controller_state:
+            await self.async_apply_fixed_idle_controller_state()
+            self._stored_controller_setpoint = None
+            self._stored_controller_state = None
+            return
+
+        current_state = parse_state(self.hass.states.get(self._controller_entity))
 
         if current_state[ATTR_HVAC_MODE] != self._stored_controller_state and self._stored_controller_state is not None:
             if compute_domain(self._controller_entity) == Platform.CLIMATE:
@@ -341,6 +418,37 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
 
         self._stored_controller_setpoint = None
         self._stored_controller_state = None
+
+    async def async_apply_fixed_idle_controller_state(self):
+        """Apply configured fixed idle state on the controller when override is inactive."""
+
+        if (
+            not self._use_fixed_idle_controller_state or
+            compute_domain(self._controller_entity) != Platform.CLIMATE
+        ):
+            return
+
+        controller_state = self.hass.states.get(self._controller_entity)
+        current_state = parse_state(controller_state)
+
+        if (
+            self._fixed_idle_controller_mode and
+            current_state[ATTR_HVAC_MODE] != self._fixed_idle_controller_mode
+        ):
+            _LOGGER.debug("Applying fixed idle HVAC mode %s to %s", self._fixed_idle_controller_mode, self._controller_entity)
+            await self._ignore_controller_state_changes()
+            await async_set_hvac_mode(
+                self.hass,
+                self._controller_entity,
+                self._fixed_idle_controller_mode,
+            )
+
+        if isinstance(self._fixed_idle_controller_temperature, (int, float)):
+            target = float(self._fixed_idle_controller_temperature)
+            if current_state[ATTR_TEMPERATURE] != target:
+                _LOGGER.debug("Applying fixed idle temperature %s to %s", target, self._controller_entity)
+                await self._ignore_controller_state_changes()
+                await async_set_temperature(self.hass, self._controller_entity, target)
 
     async def async_update_override_setpoint(self, temperature_increase: float):
         """Update the override setpoint of the controller"""

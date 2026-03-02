@@ -8,6 +8,21 @@
           "controller": "Controller entity"
         }
       },
+      "controller_idle_state": {
+        "title": "Configure Zoned Heating settings",
+        "description": "If there are TRVs in the same room as the controller thermostat, enable fixed idle state so zoned heating always returns the controller to a predictable mode and setpoint when inactive.",
+        "data": {
+          "use_fixed_idle_controller_state": "Use fixed controller idle mode + temperature (recommended with TRVs in controller room)"
+        }
+      },
+      "fixed_idle_controller_state": {
+        "title": "Configure Zoned Heating settings",
+        "description": "Choose the controller idle mode and setpoint that zoned heating should enforce while inactive.",
+        "data": {
+          "fixed_idle_controller_mode": "Controller idle HVAC mode",
+          "fixed_idle_controller_temperature": "Controller idle temperature"
+        }
+      },
       "zones": {
         "title": "Configure Zoned Heating settings",
         "description": "Choose devices which control the zones",
