@@ -8,19 +8,19 @@
           "controller": "Controller entity"
         }
       },
-      "controller_idle_state": {
+      "controller_restoration_setting": {
         "title": "Configure Zoned Heating settings",
-        "description": "If there are TRVs in the same room as the controller thermostat, enable fixed idle state so zoned heating always returns the controller to a predictable mode and setpoint when inactive.",
+        "description": "Use fixed settings for restoring controller after override mode, instead of storing controller settings prior to starting override mode. Recommended when TRVs are present in the same room as the controller thermostat.",
         "data": {
-          "use_fixed_idle_controller_state": "Use fixed controller idle mode + temperature (recommended with TRVs in controller room)"
+          "use_fixed_controller_restoration_setting": "Use fixed controller restoration mode + temperature (recommended with TRVs in controller room)"
         }
       },
-      "fixed_idle_controller_state": {
+      "fixed_controller_restoration_setting": {
         "title": "Configure Zoned Heating settings",
-        "description": "Choose the controller idle mode and setpoint that zoned heating should enforce while inactive.",
+        "description": "Choose the controller mode and setpoint that zoned heating will restore after override mode ends.",
         "data": {
-          "fixed_idle_controller_mode": "Controller idle HVAC mode",
-          "fixed_idle_controller_temperature": "Controller idle temperature"
+          "fixed_controller_restoration_mode": "Controller restoration HVAC mode",
+          "fixed_controller_restoration_setpoint": "Controller restoration temperature setpoint"
         }
       },
       "zones": {

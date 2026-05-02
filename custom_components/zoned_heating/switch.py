@@ -53,14 +53,14 @@ async def async_setup_entry(
     max_setpoint = config_entry.options.get(const.CONF_MAX_SETPOINT)
     controller_delay_time = config_entry.options.get(const.CONF_CONTROLLER_DELAY_TIME, const.DEFAULT_CONTROLLER_DELAY_TIME)
     hysteresis = config_entry.options.get(const.CONF_HYSTERESIS, config_entry.data.get(const.CONF_HYSTERESIS, const.DEFAULT_HYSTERESIS))
-    use_fixed_idle_controller_state = config_entry.options.get(
-        const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE,
-        const.DEFAULT_USE_FIXED_IDLE_CONTROLLER_STATE,
+    use_fixed_controller_restoration_setting = config_entry.options.get(
+        const.CONF_USE_FIXED_CONTROLLER_RESTORATION_SETTING,
+        const.DEFAULT_USE_FIXED_CONTROLLER_RESTORATION_SETTING,
     )
-    fixed_idle_controller_mode = config_entry.options.get(const.CONF_FIXED_IDLE_CONTROLLER_MODE)
-    fixed_idle_controller_temperature = config_entry.options.get(const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE)
+    fixed_controller_restoration_mode = config_entry.options.get(const.CONF_FIXED_CONTROLLER_RESTORATION_MODE)
+    fixed_controller_restoration_setpoint = config_entry.options.get(const.CONF_FIXED_CONTROLLER_RESTORATION_SETPOINT)
 
-    entity = ZonedHeaterSwitch(hass,controller, zones, max_setpoint, controller_delay_time, hysteresis, use_fixed_idle_controller_state, fixed_idle_controller_mode, fixed_idle_controller_temperature)
+    entity = ZonedHeaterSwitch(hass, controller, zones, max_setpoint, controller_delay_time, hysteresis, use_fixed_controller_restoration_setting, fixed_controller_restoration_mode, fixed_controller_restoration_setpoint)
     async_add_entities([entity])
 
     # Store reference to the created entity so update listener can find it
@@ -80,27 +80,36 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
 
     _attr_name = "Zoned Heating"
 
-    def __init__(self, hass, controller_entity, zone_entities, max_setpoint, controller_delay_time, hysteresis, use_fixed_idle_controller_state, fixed_idle_controller_mode, fixed_idle_controller_temperature):
+    def __init__(self, hass, controller_entity, zone_entities, max_setpoint, controller_delay_time, hysteresis, use_fixed_controller_restoration_setting, fixed_controller_restoration_mode, fixed_controller_restoration_setpoint):
         self.hass = hass
         self._controller_entity = controller_entity
         self._zone_entities = zone_entities
         self._max_setpoint = max_setpoint
         self._controller_delay_time = controller_delay_time
         self._hysteresis = hysteresis
-        self._use_fixed_idle_controller_state = (
-            use_fixed_idle_controller_state and
+        self._use_fixed_controller_restoration_setting = (
+            use_fixed_controller_restoration_setting and
             compute_domain(controller_entity) == Platform.CLIMATE
         )
-        self._fixed_idle_controller_mode = fixed_idle_controller_mode
-        self._fixed_idle_controller_temperature = fixed_idle_controller_temperature
 
         self._enabled = None
         self._state_listeners = []
         self._ignore_controller_state_change_timer = None
         self._override_active = False
         self._temperature_increase = 0
-        self._stored_controller_setpoint = None
-        self._stored_controller_state = None
+
+        # Pre-populate stored values with the fixed restoration settings when enabled.
+        # These persist across override cycles so async_stop_override_mode and
+        # async_apply_controller_restoration_setting always have the correct target.
+        if self._use_fixed_controller_restoration_setting:
+            self._stored_controller_state = fixed_controller_restoration_mode
+            self._stored_controller_setpoint = (
+                float(fixed_controller_restoration_setpoint)
+                if fixed_controller_restoration_setpoint is not None else None
+            )
+        else:
+            self._stored_controller_state = None
+            self._stored_controller_setpoint = None
 
         super().__init__()
 
@@ -148,9 +157,7 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
             const.CONF_MAX_SETPOINT: self._max_setpoint,
             const.CONF_CONTROLLER_DELAY_TIME: self._controller_delay_time,
             const.CONF_HYSTERESIS: self._hysteresis,
-            const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE: self._use_fixed_idle_controller_state,
-            const.CONF_FIXED_IDLE_CONTROLLER_MODE: self._fixed_idle_controller_mode,
-            const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE: self._fixed_idle_controller_temperature,
+            const.CONF_USE_FIXED_CONTROLLER_RESTORATION_SETTING: self._use_fixed_controller_restoration_setting,
             const.ATTR_OVERRIDE_ACTIVE: self._override_active,
             const.ATTR_TEMPERATURE_INCREASE: self._temperature_increase,
             const.ATTR_STORED_CONTROLLER_STATE: self._stored_controller_state,
@@ -204,16 +211,20 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         )
         self._hysteresis = options.get(const.CONF_HYSTERESIS, self._hysteresis)
         use_fixed = options.get(
-            const.CONF_USE_FIXED_IDLE_CONTROLLER_STATE,
-            const.DEFAULT_USE_FIXED_IDLE_CONTROLLER_STATE,
+            const.CONF_USE_FIXED_CONTROLLER_RESTORATION_SETTING,
+            const.DEFAULT_USE_FIXED_CONTROLLER_RESTORATION_SETTING,
         )
-        self._use_fixed_idle_controller_state = (
+        self._use_fixed_controller_restoration_setting = (
             use_fixed and compute_domain(self._controller_entity) == Platform.CLIMATE
         )
-        self._fixed_idle_controller_mode = options.get(const.CONF_FIXED_IDLE_CONTROLLER_MODE)
-        self._fixed_idle_controller_temperature = options.get(const.CONF_FIXED_IDLE_CONTROLLER_TEMPERATURE)
 
-        _LOGGER.debug("Config options updated: controller=%s zones=%s use_fixed=%s", self._controller_entity, self._zone_entities, self._use_fixed_idle_controller_state)
+        # Sync stored restoration target with (possibly updated) fixed values.
+        if self._use_fixed_controller_restoration_setting:
+            self._stored_controller_state = options.get(const.CONF_FIXED_CONTROLLER_RESTORATION_MODE)
+            raw = options.get(const.CONF_FIXED_CONTROLLER_RESTORATION_SETPOINT)
+            self._stored_controller_setpoint = float(raw) if raw is not None else None
+
+        _LOGGER.debug("Config options updated: controller=%s zones=%s use_fixed=%s", self._controller_entity, self._zone_entities, self._use_fixed_controller_restoration_setting)
 
         if self._enabled:
             await self.async_start_state_listeners()
@@ -232,8 +243,8 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
             return
 
         if not self._override_active:
-            if self._use_fixed_idle_controller_state:
-                await self.async_apply_fixed_idle_controller_state()
+            if self._use_fixed_controller_restoration_setting:
+                await self.async_apply_controller_restoration_setting()
             return
         old_state = parse_state(event.data["old_state"])
         new_state = parse_state(event.data["new_state"])
@@ -342,8 +353,8 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
             self._temperature_increase == temperature_increase and
             override_active == self._override_active
         ):
-            if self._use_fixed_idle_controller_state and not override_active:
-                await self.async_apply_fixed_idle_controller_state()
+            if self._use_fixed_controller_restoration_setting and not override_active:
+                await self.async_apply_controller_restoration_setting()
             # nothing to do
             return
 
@@ -367,17 +378,16 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
 
         self._override_active = True
         current_state = parse_state(self.hass.states.get(self._controller_entity))
-        # store current controller entity settings for later
-        if self._use_fixed_idle_controller_state:
-            self._stored_controller_state = None
-            self._stored_controller_setpoint = None
-        else:
+
+        # When using fixed restoration settings, stored values are already set to the
+        # fixed target — don't overwrite them with the live controller state.
+        if not self._use_fixed_controller_restoration_setting:
             _LOGGER.debug("Storing controller state=%s", current_state)
             self._stored_controller_state = current_state[ATTR_HVAC_MODE]
             self._stored_controller_setpoint = current_state[ATTR_TEMPERATURE]
 
         if current_state[ATTR_HVAC_MODE] != HVACMode.HEAT:
-            # uupdate to heat mode if needed
+            # update to heat mode if needed
             await self._ignore_controller_state_changes()
             if compute_domain(self._controller_entity) == Platform.CLIMATE:
                 await async_set_hvac_mode(self.hass, self._controller_entity, HVACMode.HEAT)
@@ -387,7 +397,7 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         await self.async_update_override_setpoint(temperature_increase)
 
     async def async_stop_override_mode(self):
-        """Stop the override of the controller and revert its prior settings"""
+        """Stop the override of the controller and restore it to the stored settings."""
         if not self._override_active:
             return
 
@@ -395,15 +405,9 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         self._override_active = False
         self._temperature_increase = 0
 
-        if self._use_fixed_idle_controller_state:
-            await self.async_apply_fixed_idle_controller_state()
-            self._stored_controller_setpoint = None
-            self._stored_controller_state = None
-            return
-
         current_state = parse_state(self.hass.states.get(self._controller_entity))
 
-        if current_state[ATTR_HVAC_MODE] != self._stored_controller_state and self._stored_controller_state is not None:
+        if self._stored_controller_state is not None and current_state[ATTR_HVAC_MODE] != self._stored_controller_state:
             if compute_domain(self._controller_entity) == Platform.CLIMATE:
                 await async_set_hvac_mode(self.hass, self._controller_entity, self._stored_controller_state)
             elif compute_domain(self._controller_entity) == Platform.SWITCH:
@@ -416,14 +420,20 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         ):
             await async_set_temperature(self.hass, self._controller_entity, self._stored_controller_setpoint)
 
-        self._stored_controller_setpoint = None
-        self._stored_controller_state = None
+        # Keep stored values for fixed mode (reused on next override cycle and by
+        # async_apply_controller_restoration_setting). Clear only for dynamic mode.
+        if not self._use_fixed_controller_restoration_setting:
+            self._stored_controller_setpoint = None
+            self._stored_controller_state = None
 
-    async def async_apply_fixed_idle_controller_state(self):
-        """Apply configured fixed idle state on the controller when override is inactive."""
+    async def async_apply_controller_restoration_setting(self):
+        """Re-apply the stored restoration setting to the controller while override is inactive.
 
+        Called whenever the controller reports a state change during idle to guard
+        against external modifications drifting away from the configured target.
+        """
         if (
-            not self._use_fixed_idle_controller_state or
+            not self._use_fixed_controller_restoration_setting or
             compute_domain(self._controller_entity) != Platform.CLIMATE
         ):
             return
@@ -432,21 +442,21 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         current_state = parse_state(controller_state)
 
         if (
-            self._fixed_idle_controller_mode and
-            current_state[ATTR_HVAC_MODE] != self._fixed_idle_controller_mode
+            self._stored_controller_state and
+            current_state[ATTR_HVAC_MODE] != self._stored_controller_state
         ):
-            _LOGGER.debug("Applying fixed idle HVAC mode %s to %s", self._fixed_idle_controller_mode, self._controller_entity)
+            _LOGGER.debug("Applying restoration HVAC mode %s to %s", self._stored_controller_state, self._controller_entity)
             await self._ignore_controller_state_changes()
             await async_set_hvac_mode(
                 self.hass,
                 self._controller_entity,
-                self._fixed_idle_controller_mode,
+                self._stored_controller_state,
             )
 
-        if isinstance(self._fixed_idle_controller_temperature, (int, float)):
-            target = float(self._fixed_idle_controller_temperature)
+        if isinstance(self._stored_controller_setpoint, (int, float)):
+            target = float(self._stored_controller_setpoint)
             if current_state[ATTR_TEMPERATURE] != target:
-                _LOGGER.debug("Applying fixed idle temperature %s to %s", target, self._controller_entity)
+                _LOGGER.debug("Applying restoration temperature %s to %s", target, self._controller_entity)
                 await self._ignore_controller_state_changes()
                 await async_set_temperature(self.hass, self._controller_entity, target)
 
@@ -519,7 +529,7 @@ class ZonedHeaterSwitch(ToggleEntity, RestoreEntity):
         delay = datetime.timedelta(seconds=self._controller_delay_time)
 
         @callback
-        async def timer_finished(now):
+        def timer_finished(_now):
             _LOGGER.debug("stop ignoring controller state changes")
             self._ignore_controller_state_change_timer = None
 
